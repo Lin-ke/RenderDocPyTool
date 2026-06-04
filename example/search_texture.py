@@ -140,28 +140,22 @@ def matching_fast_stage_textures(tool, action, needle, stage):
     if stage is not None and is_null_handle(pipe.GetShader(stage)):
         return []
 
-    try:
-        used = pipe.GetAllUsedDescriptors(False)
-    except TypeError:
-        used = pipe.GetAllUsedDescriptors()
-    except Exception:
-        if stage is None:
-            fallback = []
-            for s in (rd.ShaderStage.Vertex, rd.ShaderStage.Pixel,
-                      rd.ShaderStage.Compute, rd.ShaderStage.Geometry,
-                      rd.ShaderStage.Hull, rd.ShaderStage.Domain):
-                try:
-                    fallback.extend(pipe.GetReadOnlyResources(s, False))
-                except TypeError:
-                    fallback.extend(pipe.GetReadOnlyResources(s))
-                except Exception:
-                    pass
-            used = fallback
-        else:
+    if stage is None:
+        used = []
+        for s in (rd.ShaderStage.Vertex, rd.ShaderStage.Pixel,
+                  rd.ShaderStage.Compute, rd.ShaderStage.Geometry,
+                  rd.ShaderStage.Hull, rd.ShaderStage.Domain):
             try:
-                used = pipe.GetReadOnlyResources(stage, False)
+                used.extend(pipe.GetReadOnlyResources(s, False))
             except TypeError:
-                used = pipe.GetReadOnlyResources(stage)
+                used.extend(pipe.GetReadOnlyResources(s))
+            except Exception:
+                pass
+    else:
+        try:
+            used = pipe.GetReadOnlyResources(stage, False)
+        except TypeError:
+            used = pipe.GetReadOnlyResources(stage)
 
     out = []
     seen = set()

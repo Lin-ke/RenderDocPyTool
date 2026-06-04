@@ -38,6 +38,16 @@ def load_config(path=None):
         "%s not found. Looked in: %s" % (CONFIG_FILENAME, candidates))
 
 
+def initialise_replay():
+    """Initialise RenderDoc replay through the local wrapper module."""
+    return rd.InitialiseReplay(rd.GlobalEnvironment(), [])
+
+
+def shutdown_replay():
+    """Shutdown RenderDoc replay through the local wrapper module."""
+    return rd.ShutdownReplay()
+
+
 FULL_ACCESS = "FULL_ACCESS"
 SHADER_ACCESS = "SHADER_ACCESS"
 BINDING_ACCESS = "BINDING_ACCESS"
@@ -184,11 +194,45 @@ def format_name(fmt):
         return str(fmt)
 
 
-def _enum_name(value):
-    try:
-        return value.name
-    except Exception:
-        return str(value)
+def file_type_from_name(name):
+    """Resolve a file type name/extension to ``rd.FileType``."""
+    if name is None:
+        return rd.FileType.DDS
+    if hasattr(name, "name"):
+        return name
+    key = str(name).strip().lower()
+    if key.startswith("."):
+        key = key[1:]
+    mapping = {
+        "dds": rd.FileType.DDS,
+        "png": rd.FileType.PNG,
+        "jpg": rd.FileType.JPG,
+        "jpeg": rd.FileType.JPG,
+        "bmp": rd.FileType.BMP,
+        "tga": rd.FileType.TGA,
+        "hdr": rd.FileType.HDR,
+        "exr": rd.FileType.EXR,
+        "raw": rd.FileType.Raw,
+    }
+    if key in mapping:
+        return mapping[key]
+    raise ValueError("unsupported texture file type: %s" % name)
+
+
+def texture_file_extension(file_type):
+    """Return the conventional extension for a RenderDoc texture file type."""
+    ft = file_type_from_name(file_type)
+    mapping = {
+        rd.FileType.DDS: "dds",
+        rd.FileType.PNG: "png",
+        rd.FileType.JPG: "jpg",
+        rd.FileType.BMP: "bmp",
+        rd.FileType.TGA: "tga",
+        rd.FileType.HDR: "hdr",
+        rd.FileType.EXR: "exr",
+        rd.FileType.Raw: "raw",
+    }
+    return mapping.get(ft, str(ft).lower().replace("filetype.", ""))
 
 
 def is_texture_descriptor(desc):
@@ -528,7 +572,7 @@ class Pass(object):
         access = getattr(used, "access", None)
         sampler = getattr(used, "sampler", None)
         handle = getattr(desc, "resource", None)
-        idx = getattr(access, "index", len(self.inputs))
+        idx = getattr(access, "index", len(self._inputs))
         arr = getattr(access, "arrayElement", 0)
         stage = getattr(access, "stage", None)
         binding = Binding(category, stage, idx, arr, handle, desc, sampler, "", access)
@@ -736,6 +780,10 @@ class RenderDocTool(object):
     def getResource(self, handle, pass_=None):
         res = self.resource_by_id.get(str(handle))
         tex = self.textures.get(str(handle))
+        if tex is not None:
+            handle = tex.resourceId
+        elif res is not None:
+            handle = res.resourceId
         kind = "texture" if tex is not None else "buffer" if res is not None else "resource"
         name = getattr(res, "name", "") if res is not None else str(handle)
         return ResourceState(handle, name, kind, texture=tex, resource=res)
@@ -813,6 +861,47 @@ class RenderDocTool(object):
                     continue
                 by_event.setdefault(u.eventId, set()).add(rid)
         return by_event
+
+    def save_texture(self, resource, path, file_type="dds", mip=-1, slice_index=-1,
+                     sample_index=None, channel_extract=-1, jpeg_quality=90,
+                     type_cast=None):
+        """Save a texture through RenderDoc's replay controller.
+
+        ``resource`` may be a ResourceId, TextureDescription, ResourceState, or
+        any object exposing ``resourceId``/``handle``. Defaults preserve all mips
+        and slices in DDS, which is the fastest/lossless choice for BC textures.
+        """
+        save = rd.TextureSave()
+        rid = getattr(resource, "resourceId", None)
+        if rid is None:
+            tex = getattr(resource, "texture", None)
+            rid = getattr(tex, "resourceId", None) if tex is not None else None
+        if rid is None:
+            rid = getattr(resource, "handle", resource)
+        save.resourceId = rid
+        save.destType = file_type_from_name(file_type)
+        save.mip = int(mip)
+        save.channelExtract = int(channel_extract)
+        save.jpegQuality = int(jpeg_quality)
+        try:
+            save.slice.sliceIndex = int(slice_index)
+        except Exception:
+            pass
+        if sample_index is not None:
+            try:
+                save.sample.sampleIndex = int(sample_index)
+            except Exception:
+                pass
+        if type_cast is not None:
+            save.typeCast = type_cast
+        out_dir = os.path.dirname(os.path.abspath(path))
+        if out_dir and not os.path.isdir(out_dir):
+            os.makedirs(out_dir)
+        return self.controller.SaveTexture(save, path)
+
+    def make_pass(self, action, tag=MIN_ACCESS):
+        """Build a Pass from the current pipeline state without seeking again."""
+        return Pass(self, action, self.controller.GetPipelineState(), tag)
 
     def get_pass(self, event_id, tag=MIN_ACCESS):
         """Build a Pass for an event id or an Action object.
@@ -925,3 +1014,35 @@ class CaptureSession(object):
         self.controller = None
         self.cap = None
         return False
+
+
+def export_pass(path, event_id, callback, tag=MIN_ACCESS, force=True):
+    """Open ``path``, seek to ``event_id``, then invoke ``callback``.
+
+    The callback receives ``(tool, pass_, controller, pipe, action)``. This is
+    the high-level pass export entry point for scripts that need the controller
+    only after the capture is opened and positioned.
+    """
+    cap = rd.OpenCaptureFile()
+    try:
+        res = cap.OpenFile(path, "", None)
+        if not is_success(res):
+            raise RuntimeError("OpenFile failed: %s" % result_msg(res))
+        if not cap.LocalReplaySupport():
+            raise RuntimeError("Capture does not support local replay")
+        res, controller = cap.OpenCapture(rd.ReplayOptions(), None)
+        if controller is None or not is_success(res):
+            raise RuntimeError("OpenCapture failed: %s" % result_msg(res))
+        try:
+            controller.SetFrameEvent(event_id, force)
+            action = find_action(controller.GetRootActions(), event_id)
+            if action is None:
+                raise RuntimeError("EID %d not found" % event_id)
+            tool = RenderDocTool(controller)
+            pipe = controller.GetPipelineState()
+            pass_ = Pass(tool, action, pipe, tag)
+            return callback(tool, pass_, controller, pipe, action)
+        finally:
+            controller.Shutdown()
+    finally:
+        cap.Shutdown()

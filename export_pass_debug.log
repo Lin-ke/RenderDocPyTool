@@ -1,0 +1,9 @@
+[mirage-debug] capture : E:\mirage\mirage1.rdc
+[mirage-debug] eid     : 8395
+[mirage-debug] stage   : Pixel
+[mirage-debug] out     : E:\mirage\test_eid8395_x1619_y391.debug.txt
+[mirage-debug] out dir : E:\mirage\test_eid8395_x1619_y391.pixel
+[mirage-debug] seeking to EID 8395 ...
+[mirage-debug] DebugPixel x=1619 y=391
+[mirage-debug] OK -> E:\mirage\test_eid8395_x1619_y391.debug.txt
+RESULT {'out_path': 'E:\\mirage\\test_eid8395_x1619_y391.debug.txt', 'out_dir': 'E:\\mirage\\test_eid8395_x1619_y391.pixel', 'rdc_path': 'E:\\mirage\\mirage1.rdc', 'eid': 8395, 'stage': 'Pixel', 'pixel_xy': (1619, 391), 'group': (0, 0, 0), 'thread': (0, 0, 0)}
