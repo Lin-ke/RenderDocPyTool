@@ -1,11 +1,19 @@
 # -*- coding: utf-8 -*-
-"""Small RenderDoc replay abstraction used by the local debug scripts."""
+"""Small RenderDoc replay abstraction used by the local debug scripts.
+
+All configuration is passed explicitly via config dicts and function arguments.
+No global state.  Environment variables (PATH / PYTHONPATH) are set once from
+config so that the RenderDoc native/Python modules can be located, but no
+other env-based configuration is used.
+"""
 
 from __future__ import print_function
 
 import json
 import os
+import sys
 
+import config
 import renderdoc as rd
 
 
@@ -36,6 +44,34 @@ def load_config(path=None):
                 return json.load(f), os.path.abspath(c)
     raise FileNotFoundError(
         "%s not found. Looked in: %s" % (CONFIG_FILENAME, candidates))
+
+
+def setup_renderdoc_env(config):
+    """Set PATH / PYTHONPATH from the ``renderdoc`` section of *config*.
+
+    This is a one-time bootstrap step so that ``import renderdoc`` and the
+    native DLL dependencies resolve without requiring the caller to set
+    environment variables manually.
+
+    Returns the ``pymodules`` directory that was added (or ``None``).
+    """
+    rd_cfg = config.get("renderdoc") or {}
+    dev_dir = rd_cfg.get("development_dir") or rd_cfg.get("renderdoc_dir") or ""
+    pymodules = rd_cfg.get("pymodules_dir") or (os.path.join(dev_dir, "pymodules") if dev_dir else "")
+
+    if dev_dir and os.path.isdir(dev_dir):
+        old_path = os.environ.get("PATH", "")
+        if dev_dir not in old_path.split(os.pathsep):
+            os.environ["PATH"] = dev_dir + os.pathsep + old_path
+
+    if pymodules and os.path.isdir(pymodules):
+        old_py = os.environ.get("PYTHONPATH", "")
+        if pymodules not in old_py.split(os.pathsep):
+            os.environ["PYTHONPATH"] = pymodules + (os.pathsep + old_py if old_py else "")
+        if pymodules not in sys.path:
+            sys.path.insert(0, pymodules)
+
+    return pymodules if pymodules and os.path.isdir(pymodules) else None
 
 
 def initialise_replay():
@@ -140,9 +176,6 @@ def _build_shader_read_set():
     return out
 
 
-_SHADER_READ_USAGES = None
-
-
 def is_shader_read_usage(usage):
     """True if ``usage.usage`` represents a shader-stage read.
 
@@ -150,11 +183,8 @@ def is_shader_read_usage(usage):
     ``All_Resource`` bucket that D3D12 captures use when a descriptor table
     is visible to all stages. Excludes RTV/DSV writes, copies, barriers.
     """
-    global _SHADER_READ_USAGES
-    if _SHADER_READ_USAGES is None:
-        _SHADER_READ_USAGES = _build_shader_read_set()
     try:
-        return usage.usage in _SHADER_READ_USAGES
+        return usage.usage in _build_shader_read_set()
     except Exception:
         return False
 
@@ -380,6 +410,7 @@ class LazyResourceCollection(object):
     def list(self):
         self._load()
         return list(self._items)
+
 
 class Shader(object):
     def __init__(self, pass_, stage):

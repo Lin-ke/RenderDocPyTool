@@ -15,6 +15,9 @@ What gets dumped (plain text, RenderDoc-debugger-panel style):
        - variable changes (before / after)
        - the full set of live variables at that step
 
+All configuration is passed explicitly via config dicts and function arguments.
+No environment variables or global state are used.
+
 The script is meant to be run via:
 
     qrenderdoc.exe --python export_pass_debug.py
@@ -22,20 +25,33 @@ The script is meant to be run via:
 because the `renderdoc` / `qrenderdoc` Python modules are compiled into
 qrenderdoc.exe and are not available to a stand-alone Python install.
 
-Parameters are taken from environment variables so they can be passed
-through Qt's command-line parser without being mistaken for the file
-to open:
+Runtime parameters (passed as function arguments only):
 
-    DUMP_RDC    path to .rdc            default: E:\\mirage\\mirage1.rdc
-    DUMP_EID    event id (int)          default: 8934
-    DUMP_STAGE  pixel|vertex|compute    default: pixel
-    DUMP_PIXEL  "X,Y"                   default: viewport center
-    DUMP_GROUP  "x,y,z"  (compute)      default: 0,0,0
-    DUMP_THREAD "x,y,z"  (compute)      default: 0,0,0
-    DUMP_OUT    output text file        default: <rdc>.eid<eid>.debug.txt
-    DUMP_OUT_DIR output folder           default: <DUMP_OUT stem>.<stage>
-    DUMP_MAX_STEPS  cap on steps        default: unlimited
-    DUMP_HLSL_DECOMPILER path to HLSLDecompiler.bat/.exe for DXBC/DXIL/SPIR-V
+    rdc_path       path to .rdc            (required)
+    eid            event id (int)          (required)
+    stage          pixel|vertex|compute    default: pixel
+    pixel          (x, y) or "X,Y"         default: viewport center
+    group          (x, y, z) or "x,y,z"    default: (0, 0, 0)
+    thread         (x, y, z) or "x,y,z"    default: (0, 0, 0)
+    out_path       output text file        default: <rdc>.eid<eid>.debug.txt
+    out_dir        output folder           default: <out stem>.<stage>
+    max_steps      cap on steps            default: 0 (unlimited)
+
+Config keys under ``llm`` in ``rdc_tool.json`` (read internally):
+
+    llm_map_shader bool                   default: false
+    llm_mapper_script path                 default: <project>/llm_dxil_hlsl_mapper.py
+    llm_model      model name              default: ""
+    llm_base_url   API base URL            default: ""
+    llm_api_key    API key                 default: ""
+    llm_timeout    timeout seconds         default: 900
+
+Config keys under ``hlsl_decompiler`` in ``rdc_tool.json`` (read via decompiler_config):
+
+    tool_dir       directory hint for decompiler tools
+    spirv_cross    explicit path to spirv-cross
+    dxil_spirv     explicit path to dxil-spirv
+    dxbc2dxil      explicit path to dxbc2dxil
 """
 
 from __future__ import print_function
@@ -47,53 +63,7 @@ import subprocess
 import sys
 import traceback
 
-MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(MODULE_DIR)
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-
-
-def _preload_renderdoc_path():
-    cfg_path = os.path.join(PROJECT_ROOT, "rdc_tool.json")
-    if not os.path.exists(cfg_path):
-        return
-    try:
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-    except Exception:
-        return
-    rd_cfg = cfg.get("renderdoc") or {}
-    dev_dir = rd_cfg.get("development_dir") or ""
-    pymodules = rd_cfg.get("pymodules_dir") or (os.path.join(dev_dir, "pymodules") if dev_dir else "")
-    path_parts = [p for p in (dev_dir, pymodules) if p]
-    if path_parts:
-        os.environ["PATH"] = os.pathsep.join(path_parts + [os.environ.get("PATH", "")])
-    if pymodules and pymodules not in sys.path:
-        sys.path.insert(0, pymodules)
-
-
-_preload_renderdoc_path()
-
-# qrenderdoc is a GUI app: stdout/stderr are hidden.  Mirror everything
-# we print into a log file so we can actually see what's happening.
-_LOG_PATH = os.environ.get("DUMP_LOG",
-                           os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                        "export_pass_debug.log"))
-class _Tee(object):
-    def __init__(self, *streams): self._s = streams
-    def write(self, s):
-        for st in self._s:
-            try: st.write(s); st.flush()
-            except Exception: pass
-    def flush(self):
-        for st in self._s:
-            try: st.flush()
-            except Exception: pass
-_logfp = open(_LOG_PATH, "w", encoding="utf-8")
-sys.stdout = _Tee(sys.stdout, _logfp)
-sys.stderr = _Tee(sys.stderr, _logfp)
-
-# qrenderdoc exposes the bindings as builtin modules when launched via --python.
+import config
 import renderdoc as rd
 
 from RenderDocPyTool.hlsl_decompiler_tool import (decompile_shader,
@@ -102,21 +72,28 @@ from RenderDocPyTool.hlsl_decompiler_tool import (decompile_shader,
 from RenderDocPyTool.rdoc_interface import RenderDocTool, export_pass
 
 
-# ---------------------------------------------------------------------------
-# Configuration (read from env so Qt's positional 'filename' doesn't eat them)
-# ---------------------------------------------------------------------------
+MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(MODULE_DIR)
 
-HLSL_DECOMPILER = os.environ.get("DUMP_HLSL_DECOMPILER", os.path.dirname(os.path.abspath(__file__)))
-HLSL_DECOMPILER_TOOLS = None
 
+# ---------------------------------------------------------------------------
+# Config helpers (pure functions, no global state)
+# ---------------------------------------------------------------------------
 
 def _load_project_config(config_path=None):
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    path = config_path or os.path.join(root, "rdc_tool.json")
-    if not os.path.exists(path):
-        return {}, path
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f), path
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.dirname(here)
+    candidates = [
+        config_path,
+        os.path.join(os.getcwd(), "rdc_tool.json"),
+        os.path.join(here, "rdc_tool.json"),
+        os.path.join(root, "rdc_tool.json"),
+    ]
+    for path in candidates:
+        if path and os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f), path
+    return {}, candidates[-1]
 
 
 def _cfg_bool(value, default=False):
@@ -139,26 +116,18 @@ def _cfg_tuple(value, n, default):
     return tuple(parts[:n])
 
 
-def _load_export_pass_config(config_path=None):
+def _load_llm_config(config_path=None):
+    """Load LLM-related settings from the ``llm`` section of rdc_tool.json."""
     cfg, _ = _load_project_config(config_path)
-    ep = cfg.get("export_pass_debug") or {}
+    llm = cfg.get("llm") or {}
     return {
-        "capture": ep.get("capture") or r"E:\mirage\mirage1.rdc",
-        "eid": int(ep.get("eid", 8934)),
-        "stage": str(ep.get("stage") or "pixel").lower(),
-        "pixel": _cfg_tuple(ep.get("pixel"), 2, None),
-        "group": _cfg_tuple(ep.get("group"), 3, (0, 0, 0)),
-        "thread": _cfg_tuple(ep.get("thread"), 3, (0, 0, 0)),
-        "out": ep.get("out") or "",
-        "out_dir": ep.get("out_dir") or "",
-        "max_steps": int(ep.get("max_steps", 0)),
-        "llm_map_shader": _cfg_bool(ep.get("llm_map_shader"), False),
-        "llm_mapper_script": ep.get("llm_mapper_script") or os.path.join(
+        "llm_map_shader": _cfg_bool(llm.get("llm_map_shader"), False),
+        "llm_mapper_script": llm.get("llm_mapper_script") or os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "llm_dxil_hlsl_mapper.py"),
-        "llm_model": ep.get("llm_model") or "",
-        "llm_base_url": ep.get("llm_base_url") or "",
-        "llm_api_key": ep.get("llm_api_key") or "",
-        "llm_timeout": int(ep.get("llm_timeout", 900)),
+        "llm_model": llm.get("llm_model") or "",
+        "llm_base_url": llm.get("llm_base_url") or "",
+        "llm_api_key": llm.get("llm_api_key") or "",
+        "llm_timeout": int(llm.get("llm_timeout", 900)),
     }
 
 
@@ -170,44 +139,13 @@ def _load_decompiler_config(config_path=None):
         "dxil_spirv": dec.get("dxil_spirv") or "",
         "dxbc2dxil": dec.get("dxbc2dxil") or "",
     }
-    hint = dec.get("tool_dir") or dec.get("tool_hint") or HLSL_DECOMPILER
+    hint = dec.get("tool_dir") or dec.get("tool_hint") or os.path.dirname(os.path.abspath(__file__))
     if not hint:
         for value in tool_paths.values():
             if value:
                 hint = os.path.dirname(value)
                 break
     return hint, tool_paths
-
-
-HLSL_DECOMPILER, HLSL_DECOMPILER_TOOLS = _load_decompiler_config()
-MAX_STEPS = 0
-LLM_MAP_SHADER = False
-LLM_MAPPER_SCRIPT = os.path.join(PROJECT_ROOT, "llm_dxil_hlsl_mapper.py")
-LLM_MODEL = ""
-LLM_BASE_URL = ""
-LLM_API_KEY = ""
-LLM_TIMEOUT = 900
-
-def _parse_xy(s, n, default):
-    if not s:
-        return default
-    parts = [int(p) for p in s.replace(" ", "").split(",")]
-    while len(parts) < n:
-        parts.append(0)
-    return tuple(parts[:n])
-
-def _derive_out_path(rdc_path, eid, out_path):
-    if out_path:
-        return out_path
-    base, _ = os.path.splitext(rdc_path)
-    return "%s.eid%d.debug.txt" % (base, eid)
-
-
-def _derive_out_dir(out_path, stage_str, out_dir):
-    if out_dir:
-        return out_dir
-    base, _ = os.path.splitext(out_path)
-    return "%s.%s" % (base, stage_str)
 
 
 # ---------------------------------------------------------------------------
@@ -401,13 +339,20 @@ def _write_binary(path, data):
         f.write(data or b"")
 
 
-def export_dxil_hlsl_llm_map(dxil_lr_path, hlsl_path, out_dir, out):
+# ---------------------------------------------------------------------------
+# LLM mapping (all parameters passed explicitly)
+# ---------------------------------------------------------------------------
+
+def export_dxil_hlsl_llm_map(dxil_lr_path, hlsl_path, out_dir, out,
+                             llm_map_shader=False, llm_mapper_script="",
+                             llm_model="", llm_base_url="", llm_api_key="",
+                             llm_timeout=900):
     out.write("\n" + "=" * 78 + "\n")
     out.write("DXIL LR <-> HLSL LLM MAP\n")
     out.write("=" * 78 + "\n")
 
-    if not LLM_MAP_SHADER:
-        out.write("LLM map: <skipped: DUMP_LLM_MAP_SHADER=0>\n")
+    if not llm_map_shader:
+        out.write("LLM map: <skipped: llm_map_shader=False>\n")
         return None
     if not dxil_lr_path or not os.path.exists(dxil_lr_path):
         out.write("LLM map: <skipped: no DXIL LR/disassembly text>\n")
@@ -415,25 +360,25 @@ def export_dxil_hlsl_llm_map(dxil_lr_path, hlsl_path, out_dir, out):
     if not hlsl_path or not os.path.exists(hlsl_path):
         out.write("LLM map: <skipped: no HLSL source>\n")
         return None
-    if not os.path.exists(LLM_MAPPER_SCRIPT):
-        out.write("LLM map: <skipped: mapper not found: %s>\n" % LLM_MAPPER_SCRIPT)
+    if not llm_mapper_script or not os.path.exists(llm_mapper_script):
+        out.write("LLM map: <skipped: mapper not found: %s>\n" % llm_mapper_script)
         return None
 
     _ensure_dir(out_dir)
     map_path = os.path.join(out_dir, "dxil_hlsl_map.json")
-    cmd = [sys.executable or "python", LLM_MAPPER_SCRIPT,
+    cmd = [sys.executable or "python", llm_mapper_script,
            "--dxil-ir", dxil_lr_path,
            "--hlsl", hlsl_path,
            "--out", map_path,
            "--direct-full",
-           "--timeout", str(LLM_TIMEOUT),
+           "--timeout", str(llm_timeout),
            "--retries", "0"]
-    if LLM_MODEL:
-        cmd.extend(["--model", LLM_MODEL])
-    if LLM_BASE_URL:
-        cmd.extend(["--base-url", LLM_BASE_URL])
-    if LLM_API_KEY:
-        cmd.extend(["--api-key", LLM_API_KEY])
+    if llm_model:
+        cmd.extend(["--model", llm_model])
+    if llm_base_url:
+        cmd.extend(["--base-url", llm_base_url])
+    if llm_api_key:
+        cmd.extend(["--api-key", llm_api_key])
 
     out.write("DXIL LR : %s\n" % dxil_lr_path)
     out.write("HLSL    : %s\n" % hlsl_path)
@@ -464,7 +409,12 @@ def export_dxil_hlsl_llm_map(dxil_lr_path, hlsl_path, out_dir, out):
         return None
 
 
-def export_shader_hlsl(shader, out_dir, out):
+# ---------------------------------------------------------------------------
+# Shader export (all parameters passed explicitly)
+# ---------------------------------------------------------------------------
+
+def export_shader_hlsl(shader, out_dir, out, hlsl_decompiler="",
+                       hlsl_decompiler_tools=None):
     """Dump HLSL when possible; only dump DXIL/disassembly as fallback evidence."""
     out.write("\n" + "=" * 78 + "\n")
     out.write("HLSL DECOMPILE INPUT\n")
@@ -512,7 +462,7 @@ def export_shader_hlsl(shader, out_dir, out):
         fallback_reasons.append("unsupported shader encoding for decompiler")
         return _export_shader_fallback(shader, raw, raw_path, dxil_lr_path, fallback_reasons, out)
 
-    if not HLSL_DECOMPILER:
+    if not hlsl_decompiler:
         out.write("HLSL source: <skipped: no decompiler tool path>\n")
         fallback_reasons.append("no decompiler tool path")
         return _export_shader_fallback(shader, raw, raw_path, dxil_lr_path, fallback_reasons, out)
@@ -521,8 +471,8 @@ def export_shader_hlsl(shader, out_dir, out):
     out.write("Decompiler input: %s\n" % raw_path)
 
     result = decompile_shader(raw_path, _encoding_name(getattr(refl, "encoding", None)),
-                              hlsl_path, HLSL_DECOMPILER,
-                              tool_paths=HLSL_DECOMPILER_TOOLS)
+                              hlsl_path, hlsl_decompiler,
+                              tool_paths=hlsl_decompiler_tools)
     if result.ok:
         out.write("HLSL source: %s\n" % hlsl_path)
         try:
@@ -911,7 +861,7 @@ def _flush_group(group, lookup, out_dir, prefix):
     group["path"] = path
 
 
-def dump_trace_groups(controller, trace, out_dir, source_files, out, prefix):
+def dump_trace_groups(controller, trace, out_dir, source_files, out, prefix, max_steps=0):
     out.write("\n" + "=" * 78 + "\n")
     out.write("HLSL GROUPED SHADER EXECUTION TRACE\n")
     out.write("=" * 78 + "\n")
@@ -989,12 +939,12 @@ def dump_trace_groups(controller, trace, out_dir, source_files, out, prefix):
                 group["result"].extend(changes)
 
                 step += 1
-                if MAX_STEPS and step >= MAX_STEPS:
+                if max_steps and step >= max_steps:
                     if group is not None:
                         group["live"] = _live_lines(live)
                         _flush_group(group, lookup, out_dir, prefix)
                         groups.append(group)
-                    out.write("[Aborted: reached DUMP_MAX_STEPS=%d]\n" % MAX_STEPS)
+                    out.write("[Aborted: reached max_steps=%d]\n" % max_steps)
                     raise StopIteration
     except StopIteration:
         pass
@@ -1024,7 +974,7 @@ def dump_trace_groups(controller, trace, out_dir, source_files, out, prefix):
     out.write("Group index   : %s\n" % index_path)
 
 
-def dump_trace(controller, trace, out):
+def dump_trace(controller, trace, out, max_steps=0):
     out.write("\n" + "=" * 78 + "\n")
     out.write("SHADER EXECUTION TRACE  (step-by-step)\n")
     out.write("=" * 78 + "\n")
@@ -1151,8 +1101,8 @@ def dump_trace(controller, trace, out):
                     out.write("    %s = %s\n" % (nm, shader_value_str(live[nm], 3)))
 
                 step += 1
-                if MAX_STEPS and step >= MAX_STEPS:
-                    out.write("\n[Aborted: reached DUMP_MAX_STEPS=%d]\n" % MAX_STEPS)
+                if max_steps and step >= max_steps:
+                    out.write("\n[Aborted: reached max_steps=%d]\n" % max_steps)
                     return
     finally:
         try:    controller.FreeTrace(trace)
@@ -1205,24 +1155,50 @@ def debug_pixel_trace(controller, pipe, out, eid, pixel_xy):
 
 def export_pass_debug(rdc_path, eid, stage="pixel", pixel_xy=None, group=(0, 0, 0),
                       thread=(0, 0, 0), out_path=None, out_dir=None, max_steps=0,
-                      config_path=None, llm_config=None):
-    global MAX_STEPS, HLSL_DECOMPILER, HLSL_DECOMPILER_TOOLS
-    global LLM_MAP_SHADER, LLM_MAPPER_SCRIPT, LLM_MODEL, LLM_BASE_URL, LLM_API_KEY, LLM_TIMEOUT
-    old_max_steps = MAX_STEPS
-    old_decompiler = HLSL_DECOMPILER
-    old_tools = HLSL_DECOMPILER_TOOLS
-    old_llm = (LLM_MAP_SHADER, LLM_MAPPER_SCRIPT, LLM_MODEL, LLM_BASE_URL, LLM_API_KEY, LLM_TIMEOUT)
+                      config_path=None, decompiler_config=None):
+    """Dump complete shader debug state for a draw call.
 
-    HLSL_DECOMPILER, HLSL_DECOMPILER_TOOLS = _load_decompiler_config(config_path)
-    llm = dict(llm_config or {})
-    LLM_MAP_SHADER = _cfg_bool(llm.get("llm_map_shader"), False)
-    LLM_MAPPER_SCRIPT = llm.get("llm_mapper_script") or os.path.join(PROJECT_ROOT, "llm_dxil_hlsl_mapper.py")
-    LLM_MODEL = llm.get("llm_model") or ""
-    LLM_BASE_URL = llm.get("llm_base_url") or ""
-    LLM_API_KEY = llm.get("llm_api_key") or ""
-    LLM_TIMEOUT = int(llm.get("llm_timeout", 900))
+    All parameters are passed explicitly. No environment variables or global
+    state are used.
 
-    MAX_STEPS = max_steps
+    Parameters
+    ----------
+    rdc_path : str
+        Path to the .rdc capture file.
+    eid : int
+        Event ID to debug.
+    stage : str
+        Shader stage name (pixel, vertex, compute, etc.).
+    pixel_xy : tuple(int, int) or str, optional
+        Pixel coordinates for pixel-shader debugging.
+    group : tuple(int, int, int) or str, optional
+        Compute dispatch group.
+    thread : tuple(int, int, int) or str, optional
+        Compute thread within group.
+    out_path : str, optional
+        Explicit output text file path.
+    out_dir : str, optional
+        Explicit output folder path.
+    max_steps : int
+        Maximum debug steps (0 = unlimited).
+    config_path : str, optional
+        Path to rdc_tool.json for loading llm / decompiler defaults.
+    decompiler_config : dict, optional
+        Decompiler settings (overrides ``hlsl_decompiler`` section in config).
+    """
+    # Load configs
+    hlsl_decompiler, hlsl_decompiler_tools = _load_decompiler_config(config_path)
+    if decompiler_config:
+        hlsl_decompiler = decompiler_config.get("tool_dir") or hlsl_decompiler
+        hlsl_decompiler_tools = decompiler_config.get("tool_paths") or hlsl_decompiler_tools
+
+    llm = _load_llm_config(config_path)
+    llm_map_shader = _cfg_bool(llm.get("llm_map_shader"), False)
+    llm_mapper_script = llm.get("llm_mapper_script") or os.path.join(PROJECT_ROOT, "llm_dxil_hlsl_mapper.py")
+    llm_model = llm.get("llm_model") or ""
+    llm_base_url = llm.get("llm_base_url") or ""
+    llm_api_key = llm.get("llm_api_key") or ""
+    llm_timeout = int(llm.get("llm_timeout", 900))
 
     stage_str = stage.lower()
     stage = _stage_enum(stage_str)
@@ -1261,12 +1237,22 @@ def export_pass_debug(rdc_path, eid, stage="pixel", pixel_xy=None, group=(0, 0, 
 
                 shader = pass_.getShader(stage)
                 dump_shader(shader, out)
-                hlsl_path, source_files, dxil_lr_path = export_shader_hlsl(shader, out_dir, out)
+                hlsl_path, source_files, dxil_lr_path = export_shader_hlsl(
+                    shader, out_dir, out,
+                    hlsl_decompiler=hlsl_decompiler,
+                    hlsl_decompiler_tools=hlsl_decompiler_tools)
                 if hlsl_path:
                     out.write("HLSL grouping source: %s\n" % hlsl_path)
                 if dxil_lr_path and hlsl_path:
                     try:
-                        export_dxil_hlsl_llm_map(dxil_lr_path, hlsl_path, out_dir, out)
+                        export_dxil_hlsl_llm_map(
+                            dxil_lr_path, hlsl_path, out_dir, out,
+                            llm_map_shader=llm_map_shader,
+                            llm_mapper_script=llm_mapper_script,
+                            llm_model=llm_model,
+                            llm_base_url=llm_base_url,
+                            llm_api_key=llm_api_key,
+                            llm_timeout=llm_timeout)
                     except Exception as _llm_err:
                         out.write("LLM map: <failed: %s>\n" % _llm_err)
 
@@ -1276,39 +1262,54 @@ def export_pass_debug(rdc_path, eid, stage="pixel", pixel_xy=None, group=(0, 0, 
                 else:
                     trace, prefix = debug_pixel_trace(controller, pipe, out, eid, pixel_xy)
 
-                dump_trace_groups(controller, trace, out_dir, source_files, out, prefix)
+                dump_trace_groups(controller, trace, out_dir, source_files, out, prefix, max_steps=max_steps)
 
         export_pass(rdc_path, eid, _dump, force=True)
         print("[mirage-debug] OK -> %s" % out_path)
         return {"out_path": out_path, "out_dir": out_dir, "rdc_path": rdc_path, "eid": eid,
                 "stage": stage.name, "pixel_xy": pixel_xy, "group": group, "thread": thread}
     finally:
-        MAX_STEPS = old_max_steps
-        HLSL_DECOMPILER = old_decompiler
-        HLSL_DECOMPILER_TOOLS = old_tools
-        (LLM_MAP_SHADER, LLM_MAPPER_SCRIPT, LLM_MODEL, LLM_BASE_URL,
-         LLM_API_KEY, LLM_TIMEOUT) = old_llm
         if init_done:
             try: rd.ShutdownReplay()
             except Exception: pass
 
 
+def _derive_out_path(rdc_path, eid, out_path):
+    if out_path:
+        return out_path
+    base, _ = os.path.splitext(rdc_path)
+    return "%s.eid%d.debug.txt" % (base, eid)
+
+
+def _derive_out_dir(out_path, stage_str, out_dir):
+    if out_dir:
+        return out_dir
+    base, _ = os.path.splitext(out_path)
+    return "%s.%s" % (base, stage_str)
+
+
 def export(config_path=None, overrides=None):
-    cfg = _load_export_pass_config(config_path)
+    """Convenience entry point that reads defaults from ``export_pass_debug``
+    section of ``rdc_tool.json``.
+
+    .. deprecated::
+        Prefer calling ``export_pass_debug()`` directly with explicit arguments.
+    """
+    cfg, _ = _load_project_config(config_path)
+    ep = cfg.get("export_pass_debug") or {}
     if overrides:
-        cfg.update(overrides)
+        ep.update(overrides)
     return export_pass_debug(
-        rdc_path=cfg["capture"],
-        eid=cfg["eid"],
-        stage=cfg["stage"],
-        pixel_xy=cfg["pixel"],
-        group=cfg["group"],
-        thread=cfg["thread"],
-        out_path=cfg["out"] or None,
-        out_dir=cfg["out_dir"] or None,
-        max_steps=cfg["max_steps"],
-        config_path=config_path,
-        llm_config=cfg)
+        rdc_path=ep.get("capture") or r"E:\mirage\mirage1.rdc",
+        eid=int(ep.get("eid", 8935)),
+        stage=str(ep.get("stage") or "pixel").lower(),
+        pixel_xy=_cfg_tuple(ep.get("pixel"), 2, None),
+        group=_cfg_tuple(ep.get("group"), 3, (0, 0, 0)),
+        thread=_cfg_tuple(ep.get("thread"), 3, (0, 0, 0)),
+        out_path=ep.get("out") or None,
+        out_dir=ep.get("out_dir") or None,
+        max_steps=int(ep.get("max_steps", 0)),
+        config_path=config_path)
 
 
 def main():
