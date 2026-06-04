@@ -1,0 +1,17 @@
+# Local config (copy rdc_tool.json.example to rdc_tool.json and edit)
+rdc_tool.json
+
+# RenderDoc captures and per-script outputs
+*.rdc
+*_passes.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

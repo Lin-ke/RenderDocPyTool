@@ -1,0 +1,16 @@
+{
+  "_comment": "Copy this file to rdc_tool.json and edit the paths. The script reads rdc_tool.json from the cwd or from the project root.",
+
+  "captures": [
+    "path/to/your/capture1.rdc",
+    "path/to/your/capture2.rdc"
+  ],
+
+  "search_texture": {
+    "format": "BC1_UNorm",
+    "min_textures": 2,
+    "limit": 0,
+    "out_dir": null,
+    "out_suffix": "passes"
+  }
+}
