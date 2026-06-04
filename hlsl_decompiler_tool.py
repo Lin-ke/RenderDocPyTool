@@ -8,6 +8,9 @@ The project itself only chains existing executables:
 
 This module keeps that process outside RenderDoc dump scripts so it can be
 used both as an import and as a small command-line tool.
+
+All configuration is passed explicitly via function arguments.
+No environment variables or global state are used.
 """
 
 from __future__ import print_function
@@ -207,7 +210,7 @@ def main(argv=None):
     parser.add_argument("input")
     parser.add_argument("mode", choices=["dxbc", "dxil", "spirv"])
     parser.add_argument("output")
-    parser.add_argument("--tool", default=os.environ.get("HLSL_DECOMPILER", ""),
+    parser.add_argument("--tool", default="",
                         help="HLSL-Decompiler build dir or HLSLDecompiler.bat/.exe")
     parser.add_argument("--keep-intermediate", action="store_true")
     args = parser.parse_args(argv)

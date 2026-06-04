@@ -4,14 +4,10 @@ r"""Find passes whose pixel shader binds multiple textures of a given format.
 Capture and RenderDoc paths are read from ``rdc_tool.json``. Search parameters
 are passed by callers through ``search_texture(...)``:
 
-  set PATH=<renderdoc>\x64\Development;<renderdoc>\x64\Development\pymodules;%PATH%
-  set PYTHONPATH=<renderdoc>\x64\Development\pymodules
-  python search_texture.py
+  python search_texture.py --config path/to/rdc_tool.json
 
-Example::
-
-  search_texture(format="BC1_UNorm", min_textures=2, stage="pixel")
-
+No environment variables or global state are used. All paths and parameters
+are passed explicitly via config dict or function arguments.
 """
 
 from __future__ import print_function
@@ -21,33 +17,6 @@ import os
 import sys
 import time
 import traceback
-
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-WORKSPACE_ROOT = os.path.dirname(PROJECT_ROOT)
-if WORKSPACE_ROOT not in sys.path:
-    sys.path.insert(0, WORKSPACE_ROOT)
-
-
-def _preload_renderdoc_path():
-    cfg_path = os.path.join(PROJECT_ROOT, "rdc_tool.json")
-    if not os.path.exists(cfg_path):
-        return
-    try:
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-    except Exception:
-        return
-    rd_cfg = cfg.get("renderdoc") or {}
-    dev_dir = rd_cfg.get("development_dir") or rd_cfg.get("renderdoc_dir") or ""
-    pymodules = rd_cfg.get("pymodules_dir") or (os.path.join(dev_dir, "pymodules") if dev_dir else "")
-    path_parts = [p for p in (dev_dir, pymodules) if p]
-    if path_parts:
-        os.environ["PATH"] = os.pathsep.join(path_parts + [os.environ.get("PATH", "")])
-    if pymodules and pymodules not in sys.path:
-        sys.path.insert(0, pymodules)
-
-
-_preload_renderdoc_path()
 
 import renderdoc as rd
 
@@ -277,7 +246,7 @@ def run_one(rdc_path, fmt, min_textures, limit, out_path,
         print("[search_texture] OK -> %s" % out_path)
 
 
-def search_texture(format="BC1_UNorm", min_textures=2, limit=0, out_dir=None,
+def search_texture(format="BC1_UNorm", min_textures=4, limit=0, out_dir=None,
                    out_suffix="passes", scan_execute_indirect=True,
                    descriptor_scan_limit=0, stage="pixel", captures=None,
                    config_path=None):

@@ -1,13 +1,16 @@
 # -*- coding: utf-8 -*-
 r"""Export textures listed in a search_texture pass report.
 
-This script intentionally uses only ``tool.rdoc_interface`` as the RenderDoc access
+This script intentionally uses only ``rdoc_interface`` as the RenderDoc access
 layer. It exports each unique texture resource from the matching passes once,
 and writes a manifest mapping passes back to the exported files.
 
-Run with Python 3.6. Runtime options are read from ``rdc_tool.json``:
+All configuration is passed explicitly via config dicts and function arguments.
+No environment variables or global state are used.
 
-  C:\Users\weiyupeng\AppData\Local\Programs\Python\Python36\python.exe export_texture.py
+Run with Python 3.6+:
+
+  python export_texture.py --config path/to/rdc_tool.json
 """
 
 from __future__ import print_function
@@ -19,16 +22,19 @@ import sys
 import time
 import traceback
 
+from RenderDocPyTool.rdoc_interface import (
+    CaptureSession,
+    file_type_from_name,
+    initialise_replay,
+    is_success,
+    result_msg,
+    shutdown_replay,
+    texture_file_extension,
+    load_config,
+)
+
 
 CONFIG_FILENAME = "rdc_tool.json"
-
-CaptureSession = None
-file_type_from_name = None
-initialise_replay = None
-is_success = None
-result_msg = None
-shutdown_replay = None
-texture_file_extension = None
 
 
 def _add_candidate(candidates, path):
@@ -68,42 +74,6 @@ def as_bool(value, default=False):
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() not in ("0", "false", "no", "off", "")
-
-
-def configure_renderdoc_path(cfg, cfg_path, renderdoc_dir=None, pymodules_dir=None):
-    rd_cfg = cfg.get("renderdoc") or {}
-    dev_dir = (renderdoc_dir or rd_cfg.get("development_dir") or
-               rd_cfg.get("renderdoc_dir"))
-    dev_dir = required_value(dev_dir, "renderdoc.development_dir", cfg_path)
-    pymodules = pymodules_dir or rd_cfg.get("pymodules_dir") or os.path.join(dev_dir, "pymodules")
-    path_parts = [dev_dir, pymodules]
-    old_path = os.environ.get("PATH", "")
-    os.environ["PATH"] = os.pathsep.join(path_parts + [old_path])
-    old_pythonpath = os.environ.get("PYTHONPATH", "")
-    os.environ["PYTHONPATH"] = os.pathsep.join(
-        [pymodules] + ([old_pythonpath] if old_pythonpath else []))
-    if pymodules not in sys.path:
-        sys.path.insert(0, pymodules)
-    return dev_dir, pymodules
-
-
-def import_rdoc_interface():
-    global CaptureSession, file_type_from_name, initialise_replay
-    global is_success, result_msg, shutdown_replay, texture_file_extension
-    from RenderDocPyTool.rdoc_interface import (CaptureSession as _CaptureSession,
-                                     file_type_from_name as _file_type_from_name,
-                                     initialise_replay as _initialise_replay,
-                                     is_success as _is_success,
-                                     result_msg as _result_msg,
-                                     shutdown_replay as _shutdown_replay,
-                                     texture_file_extension as _texture_file_extension)
-    CaptureSession = _CaptureSession
-    file_type_from_name = _file_type_from_name
-    initialise_replay = _initialise_replay
-    is_success = _is_success
-    result_msg = _result_msg
-    shutdown_replay = _shutdown_replay
-    texture_file_extension = _texture_file_extension
 
 
 def safe_name(value):
@@ -230,9 +200,13 @@ def export_texture(pass_report, out_dir=None, file_type="dds", mip=-1, slice_ind
                    renderdoc_dir=None, pymodules_dir=None):
     pass_report = required_value(pass_report, "pass_report", "API argument")
     cfg, cfg_path = load_json_config(config_path)
-    dev_dir, pymodules = configure_renderdoc_path(
-        cfg, cfg_path, renderdoc_dir=renderdoc_dir, pymodules_dir=pymodules_dir)
-    import_rdoc_interface()
+
+    # Resolve RenderDoc paths from explicit args -> config -> error
+    rd_cfg = cfg.get("renderdoc") or {}
+    dev_dir = (renderdoc_dir or rd_cfg.get("development_dir") or
+               rd_cfg.get("renderdoc_dir"))
+    dev_dir = required_value(dev_dir, "renderdoc.development_dir", cfg_path)
+    pymodules = pymodules_dir or rd_cfg.get("pymodules_dir") or os.path.join(dev_dir, "pymodules")
 
     if not out_dir:
         stem, _ = os.path.splitext(pass_report)

@@ -4,12 +4,15 @@ r"""Map decompiled HLSL statements back to DXIL IR with an LLM.
 The script sends line-numbered DXIL IR and line-numbered decompiled HLSL to an
 OpenAI-compatible chat-completions API, then writes a JSON relationship map.
 
+All configuration is passed explicitly via function arguments and config dicts.
+No environment variables or global state are used.
+
 Example:
-    set OPENAI_API_KEY=...
-    python llm_dxil_hlsl_mapper.py ^
-      --dxil-ir export_smoke.debug.txt ^
-      --hlsl export_smoke.pixel\pixel_shader.hlsl ^
-      --out export_smoke.pixel\dxil_hlsl_map.json
+    python llm_dxil_hlsl_mapper.py \
+      --dxil-ir export_smoke.debug.txt \
+      --hlsl export_smoke.pixel\pixel_shader.hlsl \
+      --out export_smoke.pixel\dxil_hlsl_map.json \
+      --api-key <your-key>
 """
 
 from __future__ import print_function
@@ -383,7 +386,7 @@ def endpoint_from_base_url(base_url):
 def call_chat_completions(base_url, api_key, model, system_prompt, user_prompt,
                           temperature, timeout, retries):
     if not api_key:
-        raise ValueError("missing API key; set OPENAI_API_KEY or pass --api-key")
+        raise ValueError("missing API key; pass --api-key")
 
     payload = {
         "model": model,
@@ -440,22 +443,14 @@ def write_json(path, obj):
         f.write("\n")
 
 
-def env_first(*names):
-    for name in names:
-        value = os.environ.get(name)
-        if value:
-            return value
-    return ""
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Map decompiled HLSL lines to DXIL IR lines using an LLM")
     parser.add_argument("--dxil-ir", required=True, help="Textual DXIL IR, LLVM .ll, or RenderDoc debug dump")
     parser.add_argument("--hlsl", required=True, help="Decompiled HLSL file")
     parser.add_argument("--out", default="dxil_hlsl_map.json", help="Output JSON path")
-    parser.add_argument("--model", default=env_first("OPENAI_MODEL", "LLM_MODEL") or DEFAULT_MODEL)
-    parser.add_argument("--base-url", default=env_first("OPENAI_BASE_URL", "LLM_BASE_URL") or DEFAULT_BASE_URL)
-    parser.add_argument("--api-key", default=env_first("OPENAI_API_KEY", "DEEPSEEK_API_KEY", "CODEMAKER_API_KEY", "LLM_API_KEY") or DEFAULT_API_KEY)
+    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    parser.add_argument("--api-key", default=DEFAULT_API_KEY)
     parser.add_argument("--temperature", type=float, default=0.1)
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--retries", type=int, default=2)
