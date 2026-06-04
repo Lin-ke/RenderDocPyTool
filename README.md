@@ -81,23 +81,26 @@ when set).
 
 ## Configuration
 
-`rdc_tool.json` is the single source of truth for runtime parameters. The
-loader (`rdoc_tool.load_config`) searches in this order:
+`rdc_tool.json` stores capture paths and tool paths. Search parameters are
+passed by the caller. The loader (`rdoc_tool.load_config`) searches in this order:
 
 1. an explicit path passed to `load_config(path=...)`;
 2. `rdc_tool.json` in the current working directory;
 3. `rdc_tool.json` next to `rdoc_tool.py`.
 
-Each script reads its own section. For `search_texture.py`:
+For `search_texture.py`, config only supplies `captures`:
 
 | Key                          | Default       | Meaning                                                          |
 | ---------------------------- | ------------- | ---------------------------------------------------------------- |
 | `captures`                   | `[]`          | List of `.rdc` paths to scan                                     |
-| `search_texture.format`      | `"BC1_UNorm"` | Format substring (case-insensitive)                              |
-| `search_texture.min_textures`| `2`           | Minimum matching textures bound to PS to record a hit            |
-| `search_texture.limit`       | `0`           | `0` = all candidates; `>0` caps the verification list (debug)    |
-| `search_texture.out_dir`     | `null`        | Output directory; `null` = write next to the input `.rdc`        |
-| `search_texture.out_suffix`  | `"passes"`    | Trailing component of the output filename                        |
+Pass scan options directly:
+
+```python
+search_texture(format="BC1_UNorm", min_textures=2, limit=0,
+               out_dir=None, out_suffix="passes",
+               scan_execute_indirect=True, descriptor_scan_limit=0,
+               stage="pixel")
+```
 
 ## API tour
 

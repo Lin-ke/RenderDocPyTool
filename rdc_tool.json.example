@@ -6,11 +6,18 @@
     "path/to/your/capture2.rdc"
   ],
 
-  "search_texture": {
-    "format": "BC1_UNorm",
-    "min_textures": 2,
-    "limit": 0,
+  "renderdoc": {
+    "development_dir": "path/to/renderdoc/x64/Development",
+    "pymodules_dir": "path/to/renderdoc/x64/Development/pymodules",
+    "python": "path/to/python36/python.exe"
+  },
+
+  "export_texture": {
+    "pass_report": "path/to/search_texture_passes.txt",
     "out_dir": null,
-    "out_suffix": "passes"
+    "type": "dds",
+    "mip": -1,
+    "slice": -1,
+    "verify_replay": false
   }
 }
